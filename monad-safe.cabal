@@ -1,0 +1,33 @@
+Name: monad-safe
+Version: 0.1.0.0
+Cabal-Version: >=1.8.0.2
+Build-Type: Simple
+License: BSD3
+License-File: LICENSE
+Extra-Source-Files: README.md changelog.md
+Copyright: 2013, 2014 Gabriel Gonzalez; 2016 Ivan Lazar Miljenovic
+Author: Gabriel Gonzalez
+Maintainer: Ivan.Miljenovic@gmail.com
+Synopsis: Generalised safety for stream processors
+Description:
+    Provides the MonadSafe class and SafeT type from Gabriel Gonzalez's
+    <https://github.com/Gabriel439/Haskell-Pipes-Safe-Library pipes-safe> library.
+Category: Control, Error Handling
+
+Source-Repository head
+    Type: git
+    Location: https://github.com/ivan-m/MonadSafe.git
+
+Library
+    Build-Depends:
+        base              >= 4       && < 5  ,
+        containers        >= 0.3.0.0 && < 0.6,
+        exceptions        >= 0.6     && < 0.9,
+        mtl               >= 2.1     && < 2.3,
+        transformers      >= 0.2.0.0 && < 0.5,
+        transformers-base >= 0.4.4   && < 0.5,
+        monad-control     >= 1.0.0.4 && < 1.1
+    Exposed-Modules:
+        Control.Monad.Safe
+    HS-Source-Dirs: src
+    GHC-Options: -Wall

@@ -1,71 +1,11 @@
-{-# LANGUAGE RankNTypes, TypeFamilies, FlexibleContexts, FlexibleInstances,
-      MultiParamTypeClasses, UndecidableInstances, ScopedTypeVariables,
-      GeneralizedNewtypeDeriving, CPP, Trustworthy #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE CPP, FlexibleContexts, FlexibleInstances,
+             GeneralizedNewtypeDeriving, MultiParamTypeClasses, Trustworthy,
+             TypeFamilies, UndecidableInstances #-}
 
-{-| This module provides an orphan 'MonadCatch' instance for 'Proxy' of the
-    form:
-
-> instance (MonadCatch m, MonadIO m) => MonadCatch (Proxy a' a b' b m) where
-
-    ... so you can throw and catch exceptions within pipes using all
-    'MonadCatch' operations.
-
-    This module also provides generalized versions of some 'MonadCatch'
-    operations so that you can also protect against premature termination of
-    connected components.  For example, if you protect a 'readFile' computation
-    using 'bracket' from this module:
-
-> -- readFile.hs
-> import Pipes
-> import qualified Pipes.Prelude as P
-> import Pipes.Safe
-> import qualified System.IO as IO
-> import Prelude hiding (readFile)
->
-> readFile :: FilePath -> Producer' String (SafeT IO) ()
-> readFile file = bracket
->     (do h <- IO.openFile file IO.ReadMode
->         putStrLn $ "{" ++ file ++ " open}"
->         return h )
->     (\h -> do
->         IO.hClose h
->         putStrLn $ "{" ++ file ++ " closed}" )
->     P.fromHandle
-
-    ... then this generalized 'bracket' will guard against both exceptions and
-    premature termination of other pipes:
-
->>> runSafeT $ runEffect $ readFile "readFile.hs" >-> P.take 4 >-> P.stdoutLn
-{readFile.hs open}
--- readFile.hs
-import Pipes
-import qualified Pipes.Prelude as P
-import Pipes.Safe
-{readFile.hs closed}
-
-    Note that the 'MonadCatch' instance for 'Proxy' provides weaker versions of
-    'mask' and 'uninterruptibleMask' that do not completely prevent asynchronous
-    exceptions.  Instead, they provide a weaker guarantee that asynchronous
-    exceptions will only occur during 'Pipes.await's or 'Pipes.yield's and
-    nowhere else.  For example, if you write:
-
-> mask_ $ do
->     x <- await
->     lift $ print x
->     lift $ print x
-
-    ... then you may receive an asynchronous exception during the 'Pipes.await',
-    but you will not receive an asynchronous exception during or in between the
-    two 'print' statements.  This weaker guarantee suffices to provide
-    asynchronous exception safety.
--}
-
-module Pipes.Safe
+module Control.Monad.Safe
     ( -- * SafeT
       SafeT
     , runSafeT
-    , runSafeP
 
      -- * MonadSafe
     , ReleaseKey
@@ -85,103 +25,43 @@ module Pipes.Safe
     , module Control.Exception
     ) where
 
-import Control.Applicative (Applicative, Alternative)
-import Control.Exception(Exception(..), SomeException(..))
-import qualified Control.Monad.Catch as C
-import Control.Monad.Catch
-    ( MonadCatch(..)
-    , MonadThrow(..)
-    , MonadMask(..)
-    , mask_
-    , uninterruptibleMask_
-    , catchAll
-    , catchIOError
-    , catchJust
-    , catchIf
-    , Handler(..)
-    , catches
-    , handle
-    , handleAll
-    , handleIOError
-    , handleJust
-    , handleIf
-    , try
-    , tryJust
-    , Exception(..)
-    , SomeException
-    )
-import Control.Monad (MonadPlus)
-import Control.Monad.IO.Class (MonadIO(liftIO))
-import Control.Monad.Trans.Control (MonadBaseControl(..))
-import Control.Monad.Trans.Class (MonadTrans(lift))
+import           Control.Applicative               (Alternative)
+import           Control.Exception                 (Exception (..),
+                                                    SomeException (..))
+import           Control.Monad                     (MonadPlus)
 import qualified Control.Monad.Base                as B
+import           Control.Monad.Catch               (Exception (..),
+                                                    Handler (..),
+                                                    MonadCatch (..),
+                                                    MonadMask (..),
+                                                    MonadThrow (..),
+                                                    SomeException, catchAll,
+                                                    catchIOError, catchIf,
+                                                    catchJust, catches, handle,
+                                                    handleAll, handleIOError,
+                                                    handleIf, handleJust, mask_,
+                                                    try, tryJust,
+                                                    uninterruptibleMask_)
+import qualified Control.Monad.Catch               as C
 import qualified Control.Monad.Catch.Pure          as E
-import qualified Control.Monad.Trans.Identity      as I
 import qualified Control.Monad.Cont.Class          as CC
 import qualified Control.Monad.Error.Class         as EC
+import           Control.Monad.IO.Class            (MonadIO (liftIO))
+import qualified Control.Monad.State.Class         as SC
+import           Control.Monad.Trans.Class         (MonadTrans (lift))
+import           Control.Monad.Trans.Control       (MonadBaseControl (..))
+import qualified Control.Monad.Trans.Identity      as I
 import qualified Control.Monad.Trans.Reader        as R
 import qualified Control.Monad.Trans.RWS.Lazy      as RWS
 import qualified Control.Monad.Trans.RWS.Strict    as RWS'
 import qualified Control.Monad.Trans.State.Lazy    as S
 import qualified Control.Monad.Trans.State.Strict  as S'
-import qualified Control.Monad.State.Class         as SC
 import qualified Control.Monad.Trans.Writer.Lazy   as W
 import qualified Control.Monad.Trans.Writer.Strict as W'
 import qualified Control.Monad.Writer.Class        as WC
-import Data.IORef (IORef, newIORef, readIORef, writeIORef, atomicModifyIORef')
-import qualified Data.Map as M
-import Data.Monoid (Monoid)
-import Pipes (Proxy, Effect, Effect', runEffect)
-import Pipes.Internal (Proxy(..))
-import Pipes.Lift (liftCatchError)
-
-data Restore m = Unmasked | Masked (forall x . m x -> m x)
-
-liftMask
-    :: forall m a' a b' b r . (MonadIO m, MonadCatch m)
-    => (forall s . ((forall x . m x -> m x) -> m s) -> m s)
-    -> ((forall x . Proxy a' a b' b m x -> Proxy a' a b' b m x)
-        -> Proxy a' a b' b m r)
-    -> Proxy a' a b' b m r
-liftMask maskVariant k = do
-    ioref <- liftIO $ newIORef Unmasked
-
-    let -- mask adjacent actions in base monad
-        loop :: Proxy a' a b' b m r -> Proxy a' a b' b m r
-        loop (Request a' fa ) = Request a' (loop . fa )
-        loop (Respond b  fb') = Respond b  (loop . fb')
-        loop (M m)            = M $ maskVariant $ \unmaskVariant -> do
-            -- stash base's unmask and merge action
-            liftIO $ writeIORef ioref $ Masked unmaskVariant
-            m >>= chunk >>= return . loop
-        loop (Pure r)         = Pure r
-
-        -- unmask adjacent actions in base monad
-        unmask :: forall q. Proxy a' a b' b m q -> Proxy a' a b' b m q
-        unmask (Request a' fa ) = Request a' (unmask . fa )
-        unmask (Respond b  fb') = Respond b  (unmask . fb')
-        unmask (M m)            = M $ do
-            -- retrieve base's unmask and apply to merged action
-            Masked unmaskVariant <- liftIO $ readIORef ioref
-            unmaskVariant (m >>= chunk >>= return . unmask)
-        unmask (Pure q)         = Pure q
-
-        -- merge adjacent actions in base monad
-        chunk :: forall s. Proxy a' a b' b m s -> m (Proxy a' a b' b m s)
-        chunk (M m) = m >>= chunk
-        chunk s     = return s
-
-    loop $ k unmask
-
-instance (MonadThrow m) => MonadThrow (Proxy a' a b' b m) where
-    throwM = lift . throwM
-
-instance (MonadCatch m) => MonadCatch (Proxy a' a b' b m) where
-    catch = liftCatchError C.catch
-
-instance (MonadMask m, MonadIO m) => MonadMask (Proxy a' a b' b m) where
-    mask                = liftMask mask
-    uninterruptibleMask = liftMask uninterruptibleMask
+import           Data.IORef                        (IORef, atomicModifyIORef',
+                                                    newIORef)
+import qualified Data.Map                          as M
 
 data Finalizers m = Finalizers
     { _nextKey    :: !Integer
@@ -231,16 +111,6 @@ runSafeT m = C.bracket
             Just (Finalizers _ fs) -> mapM snd (M.toDescList fs) )
     (R.runReaderT (unSafeT m))
 {-# INLINABLE runSafeT #-}
-
-{-| Run 'SafeT' in the base monad, executing all unreleased finalizers at the
-    end of the computation
-
-    Use 'runSafeP' to safely flush all unreleased finalizers and ensure prompt
-    finalization without exiting the 'Proxy' monad.
--}
-runSafeP :: (MonadMask m, MonadIO m) => Effect (SafeT m) r -> Effect' m r
-runSafeP = lift . runSafeT . runEffect
-{-# INLINABLE runSafeP #-}
 
 -- | Token used to 'release' a previously 'register'ed finalizer
 newtype ReleaseKey = ReleaseKey { unlock :: Integer }
@@ -292,12 +162,6 @@ instance (MonadIO m, MonadCatch m, MonadMask m) => MonadSafe (SafeT m) where
                 Nothing -> error "release: SafeT block is closed"
                 Just (Finalizers n fs) ->
                     (Just $! Finalizers n (M.delete (unlock key) fs), ())
-
-instance (MonadSafe m) => MonadSafe (Proxy a' a b' b m) where
-    type Base (Proxy a' a b' b m) = Base m
-    liftBase = lift . liftBase
-    register = lift . register
-    release  = lift . release
 
 instance (MonadSafe m) => MonadSafe (I.IdentityT m) where
     type Base (I.IdentityT m) = Base m
